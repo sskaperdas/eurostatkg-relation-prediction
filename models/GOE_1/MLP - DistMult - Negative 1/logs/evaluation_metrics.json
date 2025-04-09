@@ -1,0 +1,40 @@
+{
+    "hits": {
+        "hits@1": 0.01268650242886884,
+        "hits@5": 0.054324253990284524,
+        "hits@10": 0.13601665510062458,
+        "soft_hits@1_eps=0.01": 1.0,
+        "soft_hits@5_eps=0.01": 1.0,
+        "soft_hits@10_eps=0.01": 1.0,
+        "soft_hits@1_eps=0.05": 1.0,
+        "soft_hits@5_eps=0.05": 1.0,
+        "soft_hits@10_eps=0.05": 1.0,
+        "soft_hits@1_eps=0.1": 1.0,
+        "soft_hits@5_eps=0.1": 1.0,
+        "soft_hits@10_eps=0.1": 1.0
+    },
+    "mrr": {
+        "mrr": 0.06969137351403996,
+        "soft_mrr@0.01": 1.0,
+        "soft_mrr@0.05": 1.0,
+        "soft_mrr@0.1": 1.0
+    },
+    "mean_rank": {
+        "mean_rank_strict": 10.308141047883414,
+        "mean_rank_soft@0.01": 43.0,
+        "mean_rank_soft@0.05": 43.0,
+        "mean_rank_soft@0.1": 43.0
+    },
+    "ndcg": {
+        "strict_ndcg@10": 0.05953615713327668,
+        "soft_ndcg@10@0.01": 1.0,
+        "soft_ndcg@10@0.05": 1.0,
+        "soft_ndcg@10@0.1": 1.0
+    },
+    "median_rank": {
+        "strict_median_rank": 27.0,
+        "soft_median_rank@0.01": 43.0,
+        "soft_median_rank@0.05": 43.0,
+        "soft_median_rank@0.1": 43.0
+    }
+}
