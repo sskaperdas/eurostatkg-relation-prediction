@@ -1,1 +1,14 @@
 Negative 1 = TransE like
+
+full_negative = negative_triples = np.concatenate([
+    ontology_negatives,
+    flipped_negatives,
+    np.array(popularity_negatives)
+])
+GOE_11 = GOE_1 + MPL + embedding types + full_negative
+
+GOE_14 = GOE_4 + MPL + embedding types + full_negative
+
+GOE_15 = GOE_5 + MPL + embedding types + full_negative
+
+GOE_19 = GOE_9 + CONV1D + embedding types + full_negative

@@ -14,7 +14,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Directory parameters
 BASE_DIR = "models"
-PROJECT_DIR = "GOE_1"
+PROJECT_DIR = "GOE_7"
 MODEL_NAME = "Conv1D - TransE - Negative 1"
 FULL_MODEL_DIR = os.path.join(BASE_DIR, PROJECT_DIR, MODEL_NAME)
 
@@ -22,11 +22,11 @@ FULL_MODEL_DIR = os.path.join(BASE_DIR, PROJECT_DIR, MODEL_NAME)
 EMBEDDING_DIM = 512
 EPOCHS = 70
 BATCH_SIZE = 256
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 5e-4
 PATIENCE = 5
 
 # Graph parameters
-GRAPH_FILE_PATH = "Eurostat KG.ttl"
+GRAPH_FILE_PATH = "Eurostat_KG.ttl"
 ###############################################
 # END CONFIGURATION
 ###############################################
@@ -418,7 +418,7 @@ def generate_advanced_plots(y_true, y_scores, train_losses, val_losses, model, m
 
 def evaluate_model(model, X_test, y_test, model_name="TransEModel", batch_size=512):
     """
-    Evaluates the trained model on the test set.
+    Evaluates the trained model on the hybrid loss (worked) set.
     Computes classification metrics for different thresholds.
     Saves results and evaluation time.
     """
@@ -541,7 +541,8 @@ def calculate_hits_metrics(model, X_test, y_test, epsilons=None, batch_size=512)
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                all_scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # shape: (num_relations, 3)
+                all_scores = model(batch_inputs).squeeze()
                 true_score = all_scores[r_id].item()
 
                 sorted_scores, sorted_indices = torch.sort(all_scores, descending=True)
@@ -613,7 +614,8 @@ def calculate_mrr_metrics(model, X_test, y_test, epsilons=None, batch_size=512):
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                all_scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # shape: (num_relations, 3)
+                all_scores = model(batch_inputs).squeeze()
                 true_score = all_scores[r_id].item()
 
                 sorted_scores, sorted_indices = torch.sort(all_scores, descending=True)
@@ -674,7 +676,8 @@ def calculate_mean_rank_metrics(model, X_test, y_test, epsilons=None, batch_size
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # Shape: (num_relations, 3)
+                scores = model(batch_inputs).squeeze()
                 true_score = scores[r_id].item()
 
                 # Strict rank
@@ -738,7 +741,8 @@ def calculate_ndcg_metrics(model, X_test, y_test, epsilons=None, batch_size=512,
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # Shape: (num_relations, 3)
+                scores = model(batch_inputs).squeeze()
                 sorted_scores, sorted_indices = torch.sort(scores, descending=True)
                 true_score = scores[r_id].item()
 
@@ -810,7 +814,8 @@ def calculate_median_rank_metrics(model, X_test, y_test, epsilons=None, batch_si
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # Shape: (num_relations, 3)
+                scores = model(batch_inputs).squeeze()
                 true_score = scores[r_id].item()
 
                 # Strict rank
@@ -868,7 +873,8 @@ def plot_rank_distributions_multi_eps(model, X_test, y_test, epsilons=None, batc
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # Shape: (num_relations, 3)
+                scores = model(batch_inputs).squeeze()
                 sorted_scores, sorted_indices = torch.sort(scores, descending=True)
                 true_score = scores[r_id].item()
 

@@ -7,7 +7,7 @@ SEED = 42
 random.seed(SEED)
 
 # Define file path
-graph_file_path = "Eurostat KG.ttl"  # Change this to your actual file
+graph_file_path = "Eurostat_KG.ttl"  # Change this to your actual file
 
 # Load RDF Graph
 def load_graph(file_path):

@@ -14,7 +14,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Directory parameters
 BASE_DIR = "models"
-PROJECT_DIR = "GOE_1"
+PROJECT_DIR = "GOE_7"
 MODEL_NAME = "Conv1D - TransH - Negative 1"
 FULL_MODEL_DIR = os.path.join(BASE_DIR, PROJECT_DIR, MODEL_NAME)
 
@@ -26,7 +26,7 @@ LEARNING_RATE = 1e-3
 PATIENCE = 5
 
 # Graph parameters
-GRAPH_FILE_PATH = "Eurostat KG.ttl"
+GRAPH_FILE_PATH = "Eurostat_KG.ttl"
 ###############################################
 # END CONFIGURATION
 ###############################################
@@ -252,7 +252,7 @@ def train_model(model, X_train, y_train, X_val, y_val,
     return model
 
 # Train Classification Model
-classifier = TransHConvModel(num_entities, num_relations, EMBEDDING_DIM).to(DEVICE)
+classifier = TransHConvModel(num_entities, num_relations, EMBEDDING_DIM, EMBEDDING_DIM).to(DEVICE)
 trained_classifier = train_model(classifier, X_train, y_train, X_val, y_val, patience=PATIENCE)
 os.makedirs(FULL_MODEL_DIR, exist_ok=True)
 torch.save(trained_classifier.state_dict(), os.path.join(FULL_MODEL_DIR, "classifier.pth"))
@@ -527,6 +527,7 @@ def calculate_hits_metrics(model, X_test, y_test, epsilons=None, batch_size=512)
     """
     if epsilons is None:
         epsilons = [0.01, 0.05, 0.1]
+
     model.eval()
     num_relations = model.relation_embeddings.num_embeddings
 
@@ -541,14 +542,15 @@ def calculate_hits_metrics(model, X_test, y_test, epsilons=None, batch_size=512)
 
             for j in range(len(batch_X)):
                 if batch_y[j] != 1:
-                    continue
+                    continue  # Only consider positive triples
 
                 h_id, r_id, t_id = batch_X[j].tolist()
-                all_r = torch.arange(num_relations).to(DEVICE)
-                h_expand = h_id * torch.ones_like(all_r)
-                t_expand = t_id * torch.ones_like(all_r)
+                all_r = torch.arange(num_relations, device=DEVICE)
+                h_expand = torch.full_like(all_r, h_id)
+                t_expand = torch.full_like(all_r, t_id)
 
-                all_scores = model(h_expand, all_r, t_expand).squeeze()
+                triples = torch.stack([h_expand, all_r, t_expand], dim=1)
+                all_scores = model(triples).squeeze(-1)  # Shape: [num_relations]
                 true_score = all_scores[r_id].item()
 
                 sorted_scores, sorted_indices = torch.sort(all_scores, descending=True)
@@ -569,10 +571,7 @@ def calculate_hits_metrics(model, X_test, y_test, epsilons=None, batch_size=512)
                 total += 1
 
     # Compile results
-    results = {
-        f"hits@{k}": strict_hits[k] / total for k in [1, 5, 10]
-    }
-
+    results = {f"hits@{k}": strict_hits[k] / total for k in [1, 5, 10]}
     for ε in epsilons:
         for k in [1, 5, 10]:
             results[f"soft_hits@{k}_eps={ε}"] = soft_hits[ε][k] / total
@@ -599,6 +598,7 @@ def calculate_mrr_metrics(model, X_test, y_test, epsilons=None, batch_size=512):
     """
     if epsilons is None:
         epsilons = [0.01]
+
     model.eval()
     mrr_total = 0.0
     soft_mrr_totals = {eps: 0.0 for eps in epsilons}
@@ -612,15 +612,15 @@ def calculate_mrr_metrics(model, X_test, y_test, epsilons=None, batch_size=512):
 
             for j in range(len(batch_X)):
                 if batch_y[j] != 1:
-                    continue
+                    continue  # Only evaluate positive triples
 
                 h_id, r_id, t_id = batch_X[j].tolist()
+                all_r = torch.arange(num_relations, device=DEVICE)
+                h_expand = torch.full_like(all_r, h_id)
+                t_expand = torch.full_like(all_r, t_id)
 
-                all_r = torch.arange(num_relations).to(DEVICE)
-                h_expand = h_id * torch.ones_like(all_r)
-                t_expand = t_id * torch.ones_like(all_r)
-
-                all_scores = model(h_expand, all_r, t_expand).squeeze()
+                triples = torch.stack([h_expand, all_r, t_expand], dim=1)
+                all_scores = model(triples).squeeze(-1)
                 true_score = all_scores[r_id].item()
 
                 sorted_scores, sorted_indices = torch.sort(all_scores, descending=True)
@@ -628,16 +628,15 @@ def calculate_mrr_metrics(model, X_test, y_test, epsilons=None, batch_size=512):
                 mrr_total += 1.0 / rank
 
                 for eps in epsilons:
-                    margin = sorted_scores - true_score
-                    soft_rank = (margin > eps).sum().item() + 1
+                    # Count how many scores are more than eps above the true score
+                    soft_rank = (sorted_scores > true_score + eps).sum().item() + 1
                     soft_mrr_totals[eps] += 1.0 / soft_rank
 
                 total += 1
 
     results = {"mrr": mrr_total / total if total > 0 else 0.0}
     for eps in epsilons:
-        key = f"soft_mrr@{eps}"
-        results[key] = soft_mrr_totals[eps] / total if total > 0 else 0.0
+        results[f"soft_mrr@{eps}"] = soft_mrr_totals[eps] / total if total > 0 else 0.0
 
     return results
 
@@ -677,27 +676,30 @@ def calculate_mean_rank_metrics(model, X_test, y_test, epsilons=None, batch_size
                     continue
 
                 h_id, r_id, t_id = batch_X[j].tolist()
-                all_r = torch.arange(num_relations).to(DEVICE)
-                h_expand = h_id * torch.ones_like(all_r)
-                t_expand = t_id * torch.ones_like(all_r)
+                all_r = torch.arange(num_relations, device=DEVICE)
+                h_expand = torch.full_like(all_r, h_id)
+                t_expand = torch.full_like(all_r, t_id)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                triples = torch.stack([h_expand, all_r, t_expand], dim=1)
+                scores = model(triples).squeeze(-1)
                 true_score = scores[r_id].item()
 
-                # Strict rank
+                # Strict rank: how many scores are strictly greater than true
                 rank_strict = (scores > true_score).sum().item() + 1
                 strict_ranks.append(rank_strict)
 
-                # Soft ranks for each epsilon
+                # Soft ranks: count how many scores are within epsilon margin of the true score
                 for eps in epsilons:
-                    rank_soft = (scores > (true_score - eps)).sum().item()
+                    rank_soft = (scores >= true_score - eps).sum().item()
                     soft_ranks_dict[eps].append(rank_soft)
 
     results = {
         "mean_rank_strict": np.mean(strict_ranks) if strict_ranks else 0.0
     }
     for eps in epsilons:
-        results[f"mean_rank_soft@{eps}"] = np.mean(soft_ranks_dict[eps]) if soft_ranks_dict[eps] else 0.0
+        results[f"mean_rank_soft@{eps}"] = (
+            np.mean(soft_ranks_dict[eps]) if soft_ranks_dict[eps] else 0.0
+        )
 
     return results
 
@@ -717,7 +719,6 @@ def calculate_ndcg_metrics(model, X_test, y_test, epsilons=None, batch_size=512,
         dict: {
             "strict_ndcg@k": float,
             "soft_ndcg@k@<epsilon1>": float,
-            "soft_ndcg@k@<epsilon2>": float,
             ...
         }
     """
@@ -741,11 +742,13 @@ def calculate_ndcg_metrics(model, X_test, y_test, epsilons=None, batch_size=512,
                     continue
 
                 h_id, r_id, t_id = batch_X[j].tolist()
-                all_r = torch.arange(num_relations).to(DEVICE)
-                h_expand = h_id * torch.ones_like(all_r)
-                t_expand = t_id * torch.ones_like(all_r)
+                all_r = torch.arange(num_relations, device=DEVICE)
+                h_expand = torch.full_like(all_r, h_id)
+                t_expand = torch.full_like(all_r, t_id)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                triples = torch.stack([h_expand, all_r, t_expand], dim=1)
+                scores = model(triples).squeeze(-1)  # Shape: [num_relations]
+
                 sorted_scores, sorted_indices = torch.sort(scores, descending=True)
                 true_score = scores[r_id].item()
 
@@ -758,7 +761,10 @@ def calculate_ndcg_metrics(model, X_test, y_test, epsilons=None, batch_size=512,
 
                 # Soft NDCG per epsilon
                 for eps in epsilons:
-                    soft_rels = [1 if abs(true_score - s.item()) <= eps else 0 for s in sorted_scores[:k]]
+                    soft_rels = [
+                        1 if abs(true_score - score.item()) <= eps else 0
+                        for score in sorted_scores[:k]
+                    ]
                     soft_dcg = sum((2 ** rel - 1) / math.log2(idx + 2) for idx, rel in enumerate(soft_rels))
                     soft_hits = sum(soft_rels)
                     if soft_hits == 0:
@@ -772,7 +778,9 @@ def calculate_ndcg_metrics(model, X_test, y_test, epsilons=None, batch_size=512,
         f"strict_ndcg@{k}": np.mean(strict_ndcgs) if strict_ndcgs else 0.0
     }
     for eps in epsilons:
-        results[f"soft_ndcg@{k}@{eps}"] = np.mean(soft_ndcgs_dict[eps]) if soft_ndcgs_dict[eps] else 0.0
+        results[f"soft_ndcg@{k}@{eps}"] = (
+            np.mean(soft_ndcgs_dict[eps]) if soft_ndcgs_dict[eps] else 0.0
+        )
 
     return results
 
@@ -791,7 +799,6 @@ def calculate_median_rank_metrics(model, X_test, y_test, epsilons=None, batch_si
         dict: {
             "strict_median_rank": float,
             "soft_median_rank@<ε1>": float,
-            "soft_median_rank@<ε2>": float,
             ...
         }
     """
@@ -813,14 +820,16 @@ def calculate_median_rank_metrics(model, X_test, y_test, epsilons=None, batch_si
                     continue
 
                 h_id, r_id, t_id = batch_X[j].tolist()
-                all_r = torch.arange(num_relations).to(DEVICE)
-                h_expand = h_id * torch.ones_like(all_r)
-                t_expand = t_id * torch.ones_like(all_r)
+                all_r = torch.arange(num_relations, device=DEVICE)
+                h_expand = torch.full_like(all_r, h_id)
+                t_expand = torch.full_like(all_r, t_id)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                triples = torch.stack([h_expand, all_r, t_expand], dim=1)
+                scores = model(triples).squeeze(-1)
+
                 true_score = scores[r_id].item()
 
-                # Strict rank
+                # Strict rank (position of true relation)
                 sorted_scores, sorted_indices = torch.sort(scores, descending=True)
                 strict_rank = (sorted_indices == r_id).nonzero(as_tuple=True)[0].item() + 1
                 strict_ranks.append(strict_rank)
@@ -834,7 +843,9 @@ def calculate_median_rank_metrics(model, X_test, y_test, epsilons=None, batch_si
         "strict_median_rank": float(np.median(strict_ranks)) if strict_ranks else 0.0
     }
     for eps in epsilons:
-        results[f"soft_median_rank@{eps}"] = float(np.median(soft_ranks_dict[eps])) if soft_ranks_dict[eps] else 0.0
+        results[f"soft_median_rank@{eps}"] = (
+            float(np.median(soft_ranks_dict[eps])) if soft_ranks_dict[eps] else 0.0
+        )
 
     return results
 
@@ -858,6 +869,9 @@ def plot_rank_distributions_multi_eps(model, X_test, y_test, epsilons=None, batc
     num_relations = model.relation_embeddings.num_embeddings
     os.makedirs(save_dir, exist_ok=True)
 
+    if epsilons is None:
+        epsilons = [0.01]
+
     strict_ranks = []
     soft_ranks_dict = {eps: [] for eps in epsilons}
 
@@ -871,11 +885,13 @@ def plot_rank_distributions_multi_eps(model, X_test, y_test, epsilons=None, batc
                     continue
 
                 h_id, r_id, t_id = batch_X[j].tolist()
-                all_r = torch.arange(num_relations).to(DEVICE)
-                h_expand = h_id * torch.ones_like(all_r)
-                t_expand = t_id * torch.ones_like(all_r)
+                all_r = torch.arange(num_relations, device=DEVICE)
+                h_expand = torch.full_like(all_r, h_id)
+                t_expand = torch.full_like(all_r, t_id)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                triples = torch.stack([h_expand, all_r, t_expand], dim=1)
+                scores = model(triples).squeeze(-1)
+
                 sorted_scores, sorted_indices = torch.sort(scores, descending=True)
                 true_score = scores[r_id].item()
 

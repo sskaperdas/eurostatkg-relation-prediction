@@ -204,7 +204,7 @@ class ModelWithHoIE(nn.Module):
 # --------------------------
 # Data preparation and splitting
 # --------------------------
-graph_file_path = "Eurostat KG.ttl"
+graph_file_path = "Eurostat_KG.ttl"
 num_entities, num_relations, triples, entity2idx, idx2entity, relation2idx, idx2relation = preprocess_data(
     load_graph(graph_file_path))
 
@@ -219,7 +219,7 @@ augmented_triples = np.vstack((all_triples, flipped_triples))
 positive_triples_set = set(map(tuple, triples))
 augmented_labels = np.array([1 if tuple(triple) in positive_triples_set else 0 for triple in augmented_triples])
 
-# Split data: train, validation, and test using stratified splitting
+# Split data: train, validation, and hybrid loss (worked) using stratified splitting
 stratified_splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
 train_index, temp_index = next(stratified_splitter.split(augmented_triples, augmented_labels))
 X_train_augmented = augmented_triples[train_index]
@@ -323,7 +323,7 @@ for epoch in range(num_epochs):
 model.load_state_dict(best_model_state)
 
 # --------------------------
-# Evaluation on test set
+# Evaluation on hybrid loss (worked) set
 # --------------------------
 model.eval()
 all_test_outputs = []

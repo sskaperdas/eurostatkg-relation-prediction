@@ -30,7 +30,7 @@ LEARNING_RATE = 1e-5
 PATIENCE = 5
 
 # Graph parameters
-GRAPH_FILE_PATH = "Eurostat KG.ttl"
+GRAPH_FILE_PATH = "Eurostat_KG.ttl"
 ###############################################
 # END CONFIGURATION
 ###############################################
@@ -481,7 +481,7 @@ def generate_advanced_plots(y_true, y_scores, train_losses, val_losses, model, m
 
 def evaluate_model(model, X_test, y_test, model_name="TransEModel", batch_size=512):
     """
-    Evaluates the trained model on the test set.
+    Evaluates the trained model on the hybrid loss (worked) set.
     Computes classification metrics for different thresholds.
     Saves results and evaluation time.
     """

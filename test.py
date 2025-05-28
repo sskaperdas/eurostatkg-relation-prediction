@@ -14,19 +14,19 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Directory parameters
 BASE_DIR = "models"
-PROJECT_DIR = "GOE_1"
+PROJECT_DIR = "GOE_7"
 MODEL_NAME = "test"
 FULL_MODEL_DIR = os.path.join(BASE_DIR, PROJECT_DIR, MODEL_NAME)
 
 # Training parameters
-EMBEDDING_DIM = 128
-EPOCHS = 50
-BATCH_SIZE = 128
-LEARNING_RATE = 1e-5
+EMBEDDING_DIM = 512
+EPOCHS = 70
+BATCH_SIZE = 256
+LEARNING_RATE = 5e-4
 PATIENCE = 5
 
 # Graph parameters
-GRAPH_FILE_PATH = "Eurostat KG.ttl"
+GRAPH_FILE_PATH = "Eurostat_KG.ttl"
 ###############################################
 # END CONFIGURATION
 ###############################################
@@ -74,83 +74,63 @@ def preprocess_data(graph):
 
 import torch.nn.functional as F
 # **Modified TransE Model for Classification**
-class TransEModel(nn.Module):
-    def __init__(self, num_entities, num_relations, embedding_dim, dropout_rates=None):
-        """
-        Direct relation prediction model using TransE-style architecture.
-        Predicts the relation r given a (head, tail) pair.
-        """
-        super(TransEModel, self).__init__()
-        self.embedding_dim = embedding_dim
-        self.num_relations = num_relations
+class TransEConvModel(nn.Module):
+    def __init__(self, num_entities, num_relations, embedding_dim, dropout_rate=0.5):
+        super(TransEConvModel, self).__init__()
 
-        if dropout_rates is None:
-            dropout_rates = [0.5, 0.5, 0.5, 0.3, 0.2]
-
-        # Embeddings
         self.entity_embeddings = nn.Embedding(num_entities, embedding_dim)
+        self.relation_embeddings = nn.Embedding(num_relations, embedding_dim)
 
-        # Structural features (no relation-related ones needed)
-        self.in_degree = nn.Embedding(num_entities, 1)
-        self.out_degree = nn.Embedding(num_entities, 1)
+        self.conv1d_1 = nn.Conv1d(in_channels=1, out_channels=128, kernel_size=3, padding=1)
+        self.batch_norm1 = nn.BatchNorm1d(128)
+        self.dropout1 = nn.Dropout(dropout_rate)
 
-        # BatchNorm
-        self.batch_norm = nn.BatchNorm1d(embedding_dim)
+        self.conv1d_2 = nn.Conv1d(in_channels=128, out_channels=256, kernel_size=3, padding=1)
+        self.batch_norm2 = nn.BatchNorm1d(256)
+        self.dropout2 = nn.Dropout(dropout_rate)
 
-        # Layers (h + t + predicted_t_embed = 3 * embedding_dim)
-        layer_sizes = [embedding_dim * 3, 2048, 1024, 512, 256, 128]
-        self.fc_layers = nn.ModuleList()
-        self.norm_layers = nn.ModuleList()
-        self.dropout_layers = nn.ModuleList()
+        self.dense1 = None  # Lazy init
+        self.batch_norm3 = nn.BatchNorm1d(512)
+        self.dropout3 = nn.Dropout(dropout_rate)
+        self.dense2 = nn.Linear(512, 1)
 
-        for i in range(len(layer_sizes) - 1):
-            self.fc_layers.append(nn.Linear(layer_sizes[i], layer_sizes[i + 1]))
-            self.norm_layers.append(nn.LayerNorm(layer_sizes[i + 1]))
-            rate = dropout_rates[i] if i < len(dropout_rates) else 0.2
-            self.dropout_layers.append(nn.Dropout(rate))
+    def forward(self, inputs):
+        s_embed = self.entity_embeddings(inputs[:, 0])
+        p_embed = self.relation_embeddings(inputs[:, 1])
+        o_embed = self.entity_embeddings(inputs[:, 2])
 
-        # Final classification layer (multi-class output)
-        self.fc_out = nn.Linear(layer_sizes[-1], num_relations)
+        predicted_o_embed = s_embed + p_embed
+        concatenated = torch.cat([s_embed, p_embed, o_embed, predicted_o_embed], dim=1)
+        x = concatenated.unsqueeze(1)
 
-        # Initialization
-        nn.init.xavier_uniform_(self.entity_embeddings.weight)
-        for layer in self.fc_layers:
-            nn.init.xavier_uniform_(layer.weight)
-        nn.init.xavier_uniform_(self.fc_out.weight)
+        x = self.conv1d_1(x)
+        x = self.batch_norm1(x)
+        x = F.relu(x)
+        x = self.dropout1(x)
 
-    def forward(self, h, r, t):
-        """
-        Forward pass to predict relation logits from (h, t) pair.
-        """
+        x = self.conv1d_2(x)
+        x = self.batch_norm2(x)
+        x = F.relu(x)
+        x = self.dropout2(x)
+
+        x = torch.flatten(x, start_dim=1)
+
+        if self.dense1 is None:
+            self.dense1 = nn.Linear(x.shape[1], 512).to(x.device)
+
+        x = self.dense1(x)
+        x = self.batch_norm3(x)
+        x = F.relu(x)
+        x = self.dropout3(x)
+
+        return torch.sigmoid(self.dense2(x))
+
+    def score_triple(self, h, r, t):
+        """ Raw TransE score: -‖h + r - t‖_2 """
         h_embed = self.entity_embeddings(h)
+        r_embed = self.relation_embeddings(r)
         t_embed = self.entity_embeddings(t)
-
-        h_embed += self.in_degree(h)
-        t_embed += self.out_degree(t)
-
-        h_embed = self.batch_norm(h_embed)
-        t_embed = self.batch_norm(t_embed)
-
-        predicted_t = h_embed  # TransE assumption: h + r ≈ t => r ≈ t - h
-
-        x = torch.cat([h_embed, t_embed, predicted_t], dim=1)
-
-        for i, (fc, norm, drop) in enumerate(zip(self.fc_layers, self.norm_layers, self.dropout_layers)):
-            residual = x
-            x = fc(x)
-            if i % 3 == 0:
-                x = F.silu(x)
-            elif i % 3 == 1:
-                x = F.gelu(x)
-            else:
-                x = F.leaky_relu(x, 0.01)
-            x = norm(x)
-            x = drop(x)
-            if x.shape == residual.shape:
-                x = x + residual
-
-        logits = self.fc_out(x)  # raw scores for each relation
-        return logits  # softmax should be applied in loss or prediction logic
+        return -torch.norm(h_embed + r_embed - t_embed, p=2, dim=1)
 
 # Load and preprocess dataset
 graph_file_path = GRAPH_FILE_PATH
@@ -158,56 +138,76 @@ num_entities, num_relations, triples, entity2idx, relation2idx = preprocess_data
 
 # Generate negative samples
 rng = np.random.default_rng(SEED)
+negative_triples = [(s, p, (o + rng.integers(1, num_entities)) % num_entities) for s, p, o in triples]
 
 # Convert to tensors and send to GPU
+all_triples = np.array(triples + negative_triples)
+labels = np.array([1] * len(triples) + [0] * len(negative_triples))
 
 # Load the dataset from saved files
 X_train = torch.load("models/data/X_train.pt").to(DEVICE)
-y_train = torch.load("models/data/y_train.pt").to(DEVICE).long()
+y_train = torch.load("models/data/y_train.pt").to(DEVICE)
 X_val = torch.load("models/data/X_val.pt").to(DEVICE)
-y_val = torch.load("models/data/y_val.pt").to(DEVICE).long()
+y_val = torch.load("models/data/y_val.pt").to(DEVICE)
 X_test = torch.load("models/data/X_test.pt").to(DEVICE)
-y_test = torch.load("models/data/y_test.pt").to(DEVICE).long()
+y_test = torch.load("models/data/y_test.pt").to(DEVICE)
 
 # Training function
 def train_model(model, X_train, y_train, X_val, y_val,
                 epochs=EPOCHS, batch_size=BATCH_SIZE, learning_rate=LEARNING_RATE,
-                patience=PATIENCE):
-    """
-    Train model with Early Stopping if validation loss does not improve.
-    """
+                patience=PATIENCE, margin=1.0, lambda_rank=0.5):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = nn.CrossEntropyLoss()
+    bce_loss_fn = nn.BCELoss()
+    ranking_loss_fn = nn.MarginRankingLoss(margin=margin)
+
     model.to(DEVICE)
     model.train()
     train_losses = []
     val_losses = []
-    best_val_loss = float("inf")  # Track best validation loss
-    patience_counter = 0  # Count epochs without improvement
-    start_time = time.time()
+    best_val_loss = float("inf")
+    patience_counter = 0
+
     for epoch in range(epochs):
+        model.train()
         epoch_loss = 0
-        num_batches = 0  # Track batch count
-        # Shuffle training data
+        num_batches = 0
         perm = torch.randperm(X_train.shape[0])
         X_train, y_train = X_train[perm], y_train[perm]
+
         tqdm_bar = tqdm(range(0, len(X_train), batch_size), desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
+
         for i in tqdm_bar:
             batch_X = X_train[i:i + batch_size].to(DEVICE)
             batch_y = y_train[i:i + batch_size].to(DEVICE)
             optimizer.zero_grad()
-            h, r, t = batch_X[:, 0], batch_X[:, 1], batch_X[:, 2]
-            preds = model(h, r, t)
-            loss = loss_fn(preds, batch_y)
+
+            pred_probs = model(batch_X).view(-1)
+            loss_bce = bce_loss_fn(pred_probs, batch_y.float())
+
+            # Margin ranking loss only for positive triples
+            pos_mask = (batch_y == 1)
+            if pos_mask.sum() > 0:
+                pos_triples = batch_X[pos_mask]
+                h_pos, r_pos, t_pos = pos_triples[:, 0], pos_triples[:, 1], pos_triples[:, 2]
+                t_neg = torch.randint(0, model.entity_embeddings.num_embeddings, t_pos.shape, device=DEVICE)
+                score_pos = model.score_triple(h_pos, r_pos, t_pos)
+                score_neg = model.score_triple(h_pos, r_pos, t_neg)
+                target = torch.ones_like(score_pos)
+                loss_rank = ranking_loss_fn(score_pos, score_neg, target)
+                loss = loss_bce + lambda_rank * loss_rank
+            else:
+                loss = loss_bce
+
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
-            num_batches += 1  # Track batch count
-            tqdm_bar.set_postfix(loss=epoch_loss / num_batches)  # Show averaged loss
-        # Compute average epoch loss
+            num_batches += 1
+            tqdm_bar.set_postfix(loss=epoch_loss / num_batches)
+
         avg_train_loss = epoch_loss / num_batches
         train_losses.append(avg_train_loss)
-        # **Batch-wise Validation to Prevent OOM Errors**
+
+        # === Validation ===
         val_loss = 0.0
         val_batches = 0
         model.eval()
@@ -215,61 +215,29 @@ def train_model(model, X_train, y_train, X_val, y_val,
             for j in range(0, len(X_val), batch_size):
                 batch_X_val = X_val[j:j + batch_size].to(DEVICE)
                 batch_y_val = y_val[j:j + batch_size].to(DEVICE)
-                h_val, r_val, t_val = batch_X_val[:, 0], batch_X_val[:, 1], batch_X_val[:, 2]
-                val_preds = model(h_val, r_val, t_val)
-                batch_loss = loss_fn(val_preds, batch_y_val)
-                val_loss += batch_loss.item()
+                val_preds = model(batch_X_val).view(-1)
+                val_loss += bce_loss_fn(val_preds, batch_y_val.float()).item()
                 val_batches += 1
-        avg_val_loss = val_loss / val_batches  # Compute validation loss
+        avg_val_loss = val_loss / val_batches
         val_losses.append(avg_val_loss)
-        print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}")
-        # **Early Stopping Logic**
+
+        print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f}")
+
+        # Early Stopping
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            patience_counter = 0  # Reset counter
+            patience_counter = 0
             torch.save(model.state_dict(), os.path.join(FULL_MODEL_DIR, "best_model.pth"))
-            print(f" New best model saved at epoch {epoch+1} with validation loss {avg_val_loss:.4f}")
-            with open(os.path.join(FULL_MODEL_DIR, "best_epoch.txt"), "w") as f:
-                f.write(f"{epoch + 1}\n")
         else:
             patience_counter += 1
-            print(f"Early Stopping Counter: {patience_counter}/{patience}")
-        # Stop training if patience limit reached
-        if patience_counter >= patience:
-            print(f" Early stopping at epoch {epoch+1} (No improvement for {patience} epochs)")
-            with open(os.path.join(FULL_MODEL_DIR, "last_epoch.txt"), "w") as f:
-                f.write(f"{epoch + 1}\n")
-            break
-        model.train()  # Switch back to training mode
-    training_time = time.time() - start_time
-    print(f"Training completed in {training_time:.2f} seconds.")
-    with open(os.path.join(FULL_MODEL_DIR, "training_time.txt"), "w") as f:
-        f.write(f"Training Time: {training_time:.2f} seconds ({training_time/60:.2f} minutes)\n")
-    # Save losses for plotting
-    os.makedirs(FULL_MODEL_DIR, exist_ok=True)
-    plots_dir = os.path.join(FULL_MODEL_DIR, "plots")
-    os.makedirs(plots_dir, exist_ok=True)
-    np.save(os.path.join(FULL_MODEL_DIR, "train_losses.npy"), np.array(train_losses))
-    np.save(os.path.join(FULL_MODEL_DIR, "val_losses.npy"), np.array(val_losses))
-    # **Plot Training & Validation Loss**
-    plt.figure(figsize=(8, 6))
-    plt.plot(train_losses, label="Training Loss", color='blue', linestyle="-", linewidth=2)
-    plt.plot(val_losses, label="Validation Loss", color='red', linestyle="--", linewidth=2)
-    plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.title(f"Training vs Validation Loss - {MODEL_NAME}")
-    plt.grid(alpha=0.3)
-    plt.savefig(os.path.join(plots_dir, "loss_plot.png"), dpi=300, bbox_inches="tight")
-    plt.close()
-    print(f" Training & Validation loss plot saved to {os.path.join(plots_dir, 'loss_plot.png')}")
-    # Load the best model
-    model.load_state_dict(torch.load(os.path.join(FULL_MODEL_DIR, "best_model.pth")))
-    print(f" Best model from epoch {epoch+1 - patience_counter} loaded for evaluation.")
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch + 1}")
+                break
+
     return model
 
 # Train Classification Model
-classifier = TransEModel(num_entities, num_relations, EMBEDDING_DIM).to(DEVICE)
+classifier = TransEConvModel(num_entities, num_relations, EMBEDDING_DIM).to(DEVICE)
 trained_classifier = train_model(classifier, X_train, y_train, X_val, y_val, patience=PATIENCE)
 os.makedirs(FULL_MODEL_DIR, exist_ok=True)
 torch.save(trained_classifier.state_dict(), os.path.join(FULL_MODEL_DIR, "classifier.pth"))
@@ -442,7 +410,7 @@ def generate_advanced_plots(y_true, y_scores, train_losses, val_losses, model, m
 
 def evaluate_model(model, X_test, y_test, model_name="TransEModel", batch_size=512):
     """
-    Evaluates the trained model on the test set.
+    Evaluates the trained model on the hybrid loss (worked) set.
     Computes classification metrics for different thresholds.
     Saves results and evaluation time.
     """
@@ -454,8 +422,8 @@ def evaluate_model(model, X_test, y_test, model_name="TransEModel", batch_size=5
         for i in range(0, len(X_test), batch_size):
             batch_X = X_test[i:i + batch_size].to(DEVICE)
             batch_y = y_test[i:i + batch_size].to(DEVICE)
-            h, r, t = batch_X[:, 0], batch_X[:, 1], batch_X[:, 2]
-            batch_preds = model(h, r, t).cpu()
+            batch_preds = model(batch_X).cpu()
+
             all_predictions.append(batch_preds)
             all_labels.append(batch_y.cpu())
     predictions = torch.cat(all_predictions, dim=0)
@@ -565,7 +533,8 @@ def calculate_hits_metrics(model, X_test, y_test, epsilons=None, batch_size=512)
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                all_scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # shape: (num_relations, 3)
+                all_scores = model(batch_inputs).squeeze()
                 true_score = all_scores[r_id].item()
 
                 sorted_scores, sorted_indices = torch.sort(all_scores, descending=True)
@@ -637,7 +606,8 @@ def calculate_mrr_metrics(model, X_test, y_test, epsilons=None, batch_size=512):
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                all_scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # shape: (num_relations, 3)
+                all_scores = model(batch_inputs).squeeze()
                 true_score = all_scores[r_id].item()
 
                 sorted_scores, sorted_indices = torch.sort(all_scores, descending=True)
@@ -698,7 +668,8 @@ def calculate_mean_rank_metrics(model, X_test, y_test, epsilons=None, batch_size
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # Shape: (num_relations, 3)
+                scores = model(batch_inputs).squeeze()
                 true_score = scores[r_id].item()
 
                 # Strict rank
@@ -762,7 +733,8 @@ def calculate_ndcg_metrics(model, X_test, y_test, epsilons=None, batch_size=512,
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # Shape: (num_relations, 3)
+                scores = model(batch_inputs).squeeze()
                 sorted_scores, sorted_indices = torch.sort(scores, descending=True)
                 true_score = scores[r_id].item()
 
@@ -834,7 +806,8 @@ def calculate_median_rank_metrics(model, X_test, y_test, epsilons=None, batch_si
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # Shape: (num_relations, 3)
+                scores = model(batch_inputs).squeeze()
                 true_score = scores[r_id].item()
 
                 # Strict rank
@@ -892,7 +865,8 @@ def plot_rank_distributions_multi_eps(model, X_test, y_test, epsilons=None, batc
                 h_expand = h_id * torch.ones_like(all_r)
                 t_expand = t_id * torch.ones_like(all_r)
 
-                scores = model(h_expand, all_r, t_expand).squeeze()
+                batch_inputs = torch.stack([h_expand, all_r, t_expand], dim=1)  # Shape: (num_relations, 3)
+                scores = model(batch_inputs).squeeze()
                 sorted_scores, sorted_indices = torch.sort(scores, descending=True)
                 true_score = scores[r_id].item()
 

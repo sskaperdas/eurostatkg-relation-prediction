@@ -22,11 +22,11 @@ FULL_MODEL_DIR = os.path.join(BASE_DIR, PROJECT_DIR, MODEL_NAME)
 EMBEDDING_DIM = 128
 EPOCHS = 50
 BATCH_SIZE = 128
-LEARNING_RATE = 1e-5
+LEARNING_RATE = 1e-4
 PATIENCE = 5
 
 # Graph parameters
-GRAPH_FILE_PATH = "Eurostat KG.ttl"
+GRAPH_FILE_PATH = "Eurostat_KG.ttl"
 ###############################################
 # END CONFIGURATION
 ###############################################
@@ -180,14 +180,6 @@ class TransEModel(nn.Module):
 # Load and preprocess dataset
 graph_file_path = GRAPH_FILE_PATH
 num_entities, num_relations, triples, entity2idx, relation2idx = preprocess_data(load_graph(graph_file_path))
-
-# Generate negative samples
-rng = np.random.default_rng(SEED)
-negative_triples = [(s, p, (o + rng.integers(1, num_entities)) % num_entities) for s, p, o in triples]
-
-# Convert to tensors and send to GPU
-all_triples = np.array(triples + negative_triples)
-labels = np.array([1] * len(triples) + [0] * len(negative_triples))
 
 # Load the dataset from saved files
 X_train = torch.load("models/data/X_train.pt").to(DEVICE)
@@ -470,7 +462,7 @@ def generate_advanced_plots(y_true, y_scores, train_losses, val_losses, model, m
 
 def evaluate_model(model, X_test, y_test, model_name="TransEModel", batch_size=512):
     """
-    Evaluates the trained model on the test set.
+    Evaluates the trained model on the hybrid loss (worked) set.
     Computes classification metrics for different thresholds.
     Saves results and evaluation time.
     """

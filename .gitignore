@@ -1,0 +1,13 @@
+# Ignore .pth and .npy model files
+*.pth
+*.npy
+
+# Ignore ontology/turtle files
+*.ttl
+
+# Ignore PyCharm project files
+.idea/
+
+# Ignore archives
+*.zip
+*.rar

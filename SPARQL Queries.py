@@ -3,7 +3,7 @@ import pandas as pd
 
 # Load the ontology
 g = Graph()
-file_path = "Eurostat KG.ttl"  # Update based on the uploaded file
+file_path = "Eurostat_KG.ttl"  # Update based on the uploaded file
 g.parse(file_path, format="turtle")
 
 # Define SPARQL queries

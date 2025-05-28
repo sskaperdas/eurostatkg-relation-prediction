@@ -1,0 +1,47 @@
+title,creator,version,description,totalClasses,totalObjectProperties,totalDatatypeProperties,class,label,property,type
+None,None,"2022.04.20 - This ontology carries all the classes and properties necessary for the description of the knowledge resulting from the processed data. 
+It must be enriched with the description of the enrichments resulting from semantic analyses.
+This version does not integrate the standard ontologies, the association being carried by the instantiation of the Knowledge database. An update of the ontology will be done, after the control of the instantiation, integrating then standard ontologies.",None,,,,,,,
+,,,,1884,,,,,,
+,,,,,20,,,,,
+,,,,,,16,,,,
+,,,,,,,n7294c14622694d848af78adb448f056eb1,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb10,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb11,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb12,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb2,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb3,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb4,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb5,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb6,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb7,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb8,None,,
+,,,,,,,n7294c14622694d848af78adb448f056eb9,None,,
+,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/Article,Article,,
+,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/BackgroundArticle,Background Article,,
+,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/CODEDTerm,CODEDTerm,,
+,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/Category,A class that represent the Categories that EuroStat offers,,
+,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/Category,Category,,
+,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/Classification,Classification,,
+,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/Code,Code,,
+,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/ConceptType,ConceptType,,
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/content,DatatypeProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/context,DatatypeProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/dataSource,DatatypeProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/dateCreated,DatatypeProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/dateUpdated,DatatypeProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/definition,DatatypeProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/fileDescription,DatatypeProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/fileLink,DatatypeProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasCODEDTerm,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasCategory,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasCategoryOfGlossaryArticle,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasCategoryOfStatisticExplainedArticle,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasClassification,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasCode,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasEurostatTheme,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasFrequentTerm,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasGlossaryTerm,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasOECDTerm,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasOECDTheme,ObjectProperty
+,,,,,,,,,https://ec.europa.eu/eurostat/NLP4StatRef/ontology/hasParagraph,ObjectProperty
