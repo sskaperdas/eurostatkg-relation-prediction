@@ -12,3 +12,5 @@ GOE_14 = GOE_4 + MPL + embedding types + full_negative
 GOE_15 = GOE_5 + MPL + embedding types + full_negative
 
 GOE_19 = GOE_9 + CONV1D + embedding types + full_negative
+
+In goe 1 there is a transe pure ranking mlp

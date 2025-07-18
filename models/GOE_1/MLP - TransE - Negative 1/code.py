@@ -47,7 +47,7 @@ os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(FULL_MODEL_DIR, exist_ok=True)
 
 ###############################################
-# Rest of your code (unchanged) using config variables
+# Rest of code (unchanged) using config variables
 ###############################################
 
 import matplotlib.pyplot as plt

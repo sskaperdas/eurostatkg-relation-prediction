@@ -18,7 +18,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Directory parameters
 BASE_DIR = "models"
 PROJECT_DIR = "GOE_11"
-MODEL_NAME = "MLP - HoIE - full_negative"
+MODEL_NAME = "MLP - HoIE - full_negative - ranking"
 FULL_MODEL_DIR = os.path.join(BASE_DIR, PROJECT_DIR, MODEL_NAME)
 
 # Training parameters
@@ -146,19 +146,24 @@ def circular_correlation(a, b):
     conj_fft_a = torch.conj(fft_a)
     return torch.fft.ifft(conj_fft_a * fft_b, dim=-1).real  # Take real part only
 
-class MLPHoIE(nn.Module):
+class MLPHoIE_Ranking(nn.Module):
+    """
+    This is the RANKING version of the MLPHoIE model.
+    The final sigmoid activation has been removed from the main forward pass
+    to output raw scores (logits) suitable for a ranking loss.
+    """
     def __init__(self, num_entities, num_relations, embedding_dim, dropout_rates=None):
-        super(MLPHoIE, self).__init__()
+        super(MLPHoIE_Ranking, self).__init__()
         self.embedding_dim = embedding_dim
 
         if dropout_rates is None:
-            dropout_rates = [0.5, 0.5, 0.4, 0.3, 0.2]  # Adaptive Dropout
+            dropout_rates = [0.5, 0.5, 0.4, 0.3, 0.2]
 
         # Embeddings
         self.entity_embeddings = nn.Embedding(num_entities, embedding_dim)
         self.relation_embeddings = nn.Embedding(num_relations, embedding_dim)
 
-        # BatchNorm for input (3 × embedding_dim for s_corr, p_corr, o_corr)
+        # BatchNorm for input
         self.batch_norm = nn.BatchNorm1d(embedding_dim * 3)
 
         # Dynamic Layer Sizes
@@ -192,48 +197,46 @@ class MLPHoIE(nn.Module):
         p_corr = circular_correlation(p, p)
         o_corr = circular_correlation(o, o)
 
-        # Concatenate: shape (batch_size, 3 * embedding_dim)
+        # Concatenate
         x = torch.cat([s_corr, p_corr, o_corr], dim=-1)
 
         # Batch Normalization
         x = self.batch_norm(x)
 
-        # Fully Connected MLP with residuals + norm + activations
+        # Fully Connected MLP
         for i, (fc, norm, dropout) in enumerate(zip(self.fc_layers, self.norm_layers, self.dropout_layers)):
             residual = x
             x = fc(x)
 
             # Adaptive Activations
             if i % 3 == 0:
-                x = F.silu(x)      # Swish
+                x = F.silu(x)
             elif i % 3 == 1:
-                x = F.gelu(x)      # GELU
+                x = F.gelu(x)
             else:
-                x = F.leaky_relu(x, 0.01)  # LeakyReLU
+                x = F.leaky_relu(x, 0.01)
 
             x = norm(x)
             x = dropout(x)
 
-            # Residual connection
             if x.shape == residual.shape:
                 x = x + residual
 
-        # Output layer
-        output = torch.sigmoid(self.fc_out(x))
+        # --- KEY CHANGE: Return the raw logit, not the sigmoid output ---
+        output = self.fc_out(x)
         return output
 
     def score_triple(self, h, r, t):
         """
-        Computes HoIE-style plausibility score for triples using circular correlation:
-        ⟨h ⋆ r, t⟩ where ⋆ denotes circular correlation
+        Computes the classic HoIE plausibility score for ranking.
+        Note: This uses a different scoring logic than the main `forward` method.
         """
         h_embed = self.entity_embeddings(h)
         r_embed = self.relation_embeddings(r)
         t_embed = self.entity_embeddings(t)
 
-        # Holographic Embeddings scoring: ⟨h ⋆ r, t⟩
         h_corr_r = circular_correlation(h_embed, r_embed)
-        score = torch.sum(h_corr_r * t_embed, dim=1)  # shape: [batch_size]
+        score = torch.sum(h_corr_r * t_embed, dim=1)
 
         return score
 
@@ -452,72 +455,65 @@ X_test = torch.tensor(X_test, dtype=torch.long).to(DEVICE)
 y_test = torch.tensor(y_test, dtype=torch.float32).to(DEVICE)
 
 # Training function
-def train_model(model, X_train, y_train, X_val, y_val,
-                idx2entity, idx2relation, constraints, entity_type_map,
-                epochs=EPOCHS, batch_size=BATCH_SIZE, learning_rate=LEARNING_RATE,
-                patience=PATIENCE, margin=1.0, lambda_rank=0.5, gamma_sem=1.0):
+def train_ranking_model(model, X_train, y_train, X_val, y_val,
+                        epochs, batch_size, learning_rate,
+                        patience, weight_decay=0.01, margin=1.0):
     """
-    Train model using BCE + Ranking + Semantic Constraint Loss with Early Stopping and full logging.
+    Trains a model for a RANKING task using MarginRankingLoss.
+    This version is adapted from your hybrid loss trainer.
     """
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = HybridLossWithSemantics(margin=margin, alpha=1.0, beta=lambda_rank, gamma=gamma_sem)
-    bce_loss_only = nn.BCELoss()
-
+    # 1. Use MarginRankingLoss for the ranking task
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    loss_fn = nn.MarginRankingLoss(margin=margin)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
-
     model.to(DEVICE)
-    model.train()
 
     train_losses, val_losses = [], []
     best_val_loss = float("inf")
     patience_counter = 0
     start_time = time.time()
 
+    # Use a distinct subdirectory for ranking results
+    plots_dir = os.path.join(FULL_MODEL_DIR, "plots_ranking")
+    os.makedirs(plots_dir, exist_ok=True)
+
+    print("--- Starting Model Training (Ranking-Only Objective) ---")
+
     for epoch in range(epochs):
+        model.train()
         epoch_loss = 0
         num_batches = 0
 
         # Shuffle training data
         perm = torch.randperm(X_train.shape[0])
-        X_train, y_train = X_train[perm], y_train[perm]
+        X_train_shuffled, y_train_shuffled = X_train[perm], y_train[perm]
 
-        tqdm_bar = tqdm(range(0, len(X_train), batch_size), desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
+        tqdm_bar = tqdm(range(0, len(X_train_shuffled), batch_size), desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
         for i in tqdm_bar:
-            batch_X = X_train[i:i + batch_size].to(DEVICE)
-            batch_y = y_train[i:i + batch_size].to(DEVICE)
-            h, r, t = batch_X[:, 0], batch_X[:, 1], batch_X[:, 2]
+            batch_X = X_train_shuffled[i:i + batch_size].to(DEVICE)
+            batch_y = y_train_shuffled[i:i + batch_size].to(DEVICE)
+
+            # Separate batch into positive and negative triples
+            pos_triples = batch_X[batch_y == 1]
+            neg_triples = batch_X[batch_y == 0]
+
+            if len(pos_triples) == 0 or len(neg_triples) == 0:
+                continue
+
+            min_len = min(len(pos_triples), len(neg_triples))
+            pos_triples = pos_triples[:min_len]
+            neg_triples = neg_triples[:min_len]
 
             optimizer.zero_grad()
-            preds = model(h, r, t).view(-1)
 
-            # Separate pos/neg triples
-            pos_mask = (batch_y == 1)
-            neg_mask = (batch_y == 0)
+            # Get raw scores (logits) directly from the model's forward pass
+            pos_scores = model(pos_triples[:, 0], pos_triples[:, 1], pos_triples[:, 2])
+            neg_scores = model(neg_triples[:, 0], neg_triples[:, 1], neg_triples[:, 2])
 
-            if pos_mask.sum() > 0 and neg_mask.sum() > 0:
-                pos_triples = batch_X[pos_mask]
-                neg_triples = batch_X[neg_mask]
+            # Target is a tensor of 1s, indicating we want pos_scores > neg_scores
+            target = torch.ones_like(pos_scores).to(DEVICE)
 
-                min_len = min(len(pos_triples), len(neg_triples))
-                if min_len > 0:
-                    pos_triples = pos_triples[:min_len]
-                    neg_triples = neg_triples[:min_len]
-                    loss = loss_fn(
-                        pred_probs=preds,
-                        true_labels=batch_y,
-                        model=model,
-                        pos_triples=pos_triples,
-                        neg_triples=neg_triples,
-                        idx2entity=idx2entity,
-                        idx2relation=idx2relation,
-                        constraints=constraints,
-                        entity_type_map=entity_type_map
-                    )
-                else:
-                    loss = bce_loss_only(preds, batch_y.float())
-            else:
-                loss = bce_loss_only(preds, batch_y.float())
-
+            loss = loss_fn(pos_scores.view(-1), neg_scores.view(-1), target.view(-1))
             loss.backward()
             optimizer.step()
 
@@ -525,75 +521,84 @@ def train_model(model, X_train, y_train, X_val, y_val,
             num_batches += 1
             tqdm_bar.set_postfix(loss=epoch_loss / num_batches)
 
-        avg_train_loss = epoch_loss / num_batches
+        avg_train_loss = epoch_loss / num_batches if num_batches > 0 else 0
         train_losses.append(avg_train_loss)
 
-        # === Validation (BCE only) ===
+        # --- Validation Phase (using the same ranking loss) ---
+        model.eval()
         val_loss = 0.0
         val_batches = 0
-        model.eval()
         with torch.no_grad():
             for j in range(0, len(X_val), batch_size):
                 batch_X_val = X_val[j:j + batch_size].to(DEVICE)
                 batch_y_val = y_val[j:j + batch_size].to(DEVICE)
-                h_val, r_val, t_val = batch_X_val[:, 0], batch_X_val[:, 1], batch_X_val[:, 2]
-                val_preds = model(h_val, r_val, t_val).view(-1)
-                batch_loss = bce_loss_only(val_preds, batch_y_val.view(-1))
+
+                pos_val = batch_X_val[batch_y_val == 1]
+                neg_val = batch_X_val[batch_y_val == 0]
+
+                if len(pos_val) == 0 or len(neg_val) == 0:
+                    continue
+
+                min_len_val = min(len(pos_val), len(neg_val))
+                pos_val = pos_val[:min_len_val]
+                neg_val = neg_val[:min_len_val]
+
+                pos_scores_val = model(pos_val[:, 0], pos_val[:, 1], pos_val[:, 2])
+                neg_scores_val = model(neg_val[:, 0], neg_val[:, 1], neg_val[:, 2])
+
+                target_val = torch.ones_like(pos_scores_val).to(DEVICE)
+                batch_loss = loss_fn(pos_scores_val.view(-1), neg_scores_val.view(-1), target_val.view(-1))
                 val_loss += batch_loss.item()
                 val_batches += 1
 
-        avg_val_loss = val_loss / val_batches
+        avg_val_loss = val_loss / val_batches if val_batches > 0 else 0
         val_losses.append(avg_val_loss)
         scheduler.step(avg_val_loss)
 
         print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}")
 
-        # Early stopping
+        # --- Early Stopping Logic ---
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(FULL_MODEL_DIR, "best_model.pth"))
-            print(f" New best model saved at epoch {epoch+1} with validation loss {avg_val_loss:.4f}")
-            with open(os.path.join(FULL_MODEL_DIR, "best_epoch.txt"), "w") as f:
-                f.write(f"{epoch + 1}\n")
+            torch.save(model.state_dict(), os.path.join(FULL_MODEL_DIR, "best_ranking_model.pth"))
+            print(f" New best ranking model saved at epoch {epoch + 1} with validation loss {avg_val_loss:.4f}")
         else:
             patience_counter += 1
             print(f"Early Stopping Counter: {patience_counter}/{patience}")
             if patience_counter >= patience:
-                print(f" Early stopping at epoch {epoch + 1} (No improvement for {patience} epochs)")
-                with open(os.path.join(FULL_MODEL_DIR, "last_epoch.txt"), "w") as f:
-                    f.write(f"{epoch + 1}\n")
+                print(f" Early stopping at epoch {epoch + 1}")
                 break
 
-        model.train()
-
+    # --- Post-Training ---
     training_time = time.time() - start_time
     print(f"Training completed in {training_time:.2f} seconds.")
-    with open(os.path.join(FULL_MODEL_DIR, "training_time.txt"), "w") as f:
+    with open(os.path.join(FULL_MODEL_DIR, "training_time_ranking.txt"), "w") as f:
         f.write(f"Training Time: {training_time:.2f} seconds ({training_time / 60:.2f} minutes)\n")
 
-    # Save losses
-    plots_dir = os.path.join(FULL_MODEL_DIR, "plots")
-    os.makedirs(plots_dir, exist_ok=True)
-    np.save(os.path.join(FULL_MODEL_DIR, "train_losses.npy"), np.array(train_losses))
-    np.save(os.path.join(FULL_MODEL_DIR, "val_losses.npy"), np.array(val_losses))
+    np.save(os.path.join(FULL_MODEL_DIR, "train_losses_ranking.npy"), np.array(train_losses))
+    np.save(os.path.join(FULL_MODEL_DIR, "val_losses_ranking.npy"), np.array(val_losses))
 
-    # Plot losses
     plt.figure(figsize=(8, 6))
     plt.plot(train_losses, label="Training Loss", color='blue', linewidth=2)
     plt.plot(val_losses, label="Validation Loss", color='red', linestyle="--", linewidth=2)
     plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.title(f"Training vs Validation Loss - {MODEL_NAME}")
+    plt.ylabel("Margin Ranking Loss")
+    plt.title(f"Training vs Validation Loss (Ranking) - {MODEL_NAME}")
     plt.legend()
     plt.grid(alpha=0.3)
-    plt.savefig(os.path.join(plots_dir, "loss_plot.png"), dpi=300, bbox_inches="tight")
+    plt.savefig(os.path.join(plots_dir, "loss_plot_ranking.png"), dpi=300, bbox_inches="tight")
     plt.close()
-    print(f" Training & Validation loss plot saved to {os.path.join(plots_dir, 'loss_plot.png')}")
+    print(f" Training & Validation loss plot saved to {os.path.join(plots_dir, 'loss_plot_ranking.png')}")
 
     # Load best model
-    model.load_state_dict(torch.load(os.path.join(FULL_MODEL_DIR, "best_model.pth")))
-    print(f" Best model from epoch {epoch + 1 - patience_counter} loaded for evaluation.")
+    best_model_path = os.path.join(FULL_MODEL_DIR, "best_ranking_model.pth")
+    if os.path.exists(best_model_path):
+        model.load_state_dict(torch.load(best_model_path))
+        print(f" Best ranking model loaded for evaluation.")
+    else:
+        print("Warning: Best model file not found. Returning model with last weights.")
+
     return model
 
 g = load_graph(graph_file_path)
@@ -608,21 +613,18 @@ for rel_uri, idx in relation2idx.items():
     idx2relation[idx] = rel_uri
 
 # Train Classification Model
-classifier = MLPHoIE(num_entities, num_relations, EMBEDDING_DIM).to(DEVICE)
-trained_classifier = train_model(
+classifier = MLPHoIE_Ranking(num_entities, num_relations, EMBEDDING_DIM).to(DEVICE)
+trained_classifier = train_ranking_model(
     model=classifier,
     X_train=X_train,
     y_train=y_train,
     X_val=X_val,
     y_val=y_val,
-    idx2entity=idx2entity,
-    idx2relation=idx2relation,
-    constraints=constraints,
-    entity_type_map=entity_type_map,
-    patience=5,
-    margin=1.0,
-    lambda_rank=0.5,
-    gamma_sem=1.0
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    learning_rate=LEARNING_RATE,
+    patience=PATIENCE,
+    margin=1.0
 )
 os.makedirs(FULL_MODEL_DIR, exist_ok=True)
 torch.save(trained_classifier.state_dict(), os.path.join(FULL_MODEL_DIR, "classifier.pth"))

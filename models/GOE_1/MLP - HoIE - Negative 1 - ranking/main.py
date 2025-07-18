@@ -6,10 +6,6 @@ import random
 import time
 import numpy as np
 import torch
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend for HPC (no display)
-import matplotlib.pyplot as plt
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # General parameters
 SEED = 42
@@ -17,8 +13,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Directory parameters
 BASE_DIR = "models"
-PROJECT_DIR = "GOE_11"
-MODEL_NAME = "MLP - HoIE - full_negative"
+PROJECT_DIR = "GOE_1"
+MODEL_NAME = "MLP - HoIE - Negative 1 - ranking"
 FULL_MODEL_DIR = os.path.join(BASE_DIR, PROJECT_DIR, MODEL_NAME)
 
 # Training parameters
@@ -53,6 +49,7 @@ os.makedirs(FULL_MODEL_DIR, exist_ok=True)
 # Rest of your code (unchanged) using config variables
 ###############################################
 
+import matplotlib.pyplot as plt
 import seaborn as sns
 import torch.nn as nn
 import torch.optim as optim
@@ -75,70 +72,7 @@ def preprocess_data(graph):
     return len(entities), len(relations), triples, entity2idx, relation2idx
 
 import torch.nn.functional as F
-
-
-def semantic_violation_penalty(triples, idx2entity, idx2relation, constraints, entity_type_map):
-    """
-    Computes the fraction of triples that violate rdfs:domain or rdfs:range constraints.
-
-    Args:
-        triples (Tensor): shape [batch_size, 3] (h, r, t) in index form.
-        idx2entity (list or dict): Mapping from entity index to URI.
-        idx2relation (list or dict): Mapping from relation index to URI.
-        constraints (dict): {relation_uri: (domain_uri, range_uri)}
-        entity_type_map (dict): {entity_uri: set(types)}
-
-    Returns:
-        torch.Tensor: scalar penalty ∈ [0, 1]
-    """
-    violations = 0
-
-    for h, r, t in triples.tolist():
-        h_uri = idx2entity[h]
-        r_uri = idx2relation[r]
-        t_uri = idx2entity[t]
-        domain, range_ = constraints.get(r_uri, (None, None))
-
-        # Get types
-        h_types = entity_type_map.get(h_uri, set())
-        t_types = entity_type_map.get(t_uri, set())
-
-        domain_violation = domain and domain not in h_types
-        range_violation = range_ and range_ not in t_types
-
-        if domain_violation or range_violation:
-            violations += 1
-
-    return torch.tensor(violations / len(triples), dtype=torch.float32, device=DEVICE)
-
-class HybridLossWithSemantics(nn.Module):
-    def __init__(self, margin=1.0, alpha=1.0, beta=1.0, gamma=1.0):
-        super().__init__()
-        self.bce = nn.BCELoss()
-        self.margin = margin
-        self.alpha = alpha  # BCE
-        self.beta = beta    # Ranking
-        self.gamma = gamma  # Semantic constraints
-        self.ranking = nn.MarginRankingLoss(margin=margin)
-
-    def forward(self, pred_probs, true_labels, model, pos_triples, neg_triples,
-                idx2entity, idx2relation, constraints, entity_type_map):
-
-        loss_bce = self.bce(pred_probs.view(-1), true_labels.float().view(-1))
-
-        # Margin ranking
-        pos_scores = model.score_triple(pos_triples[:, 0], pos_triples[:, 1], pos_triples[:, 2])
-        neg_scores = model.score_triple(neg_triples[:, 0], neg_triples[:, 1], neg_triples[:, 2])
-        target = torch.ones_like(pos_scores).to(pos_scores.device)
-        loss_rank = self.ranking(pos_scores, neg_scores, target)
-
-        # Semantic penalty
-        batch_triples = torch.cat([pos_triples, neg_triples], dim=0)
-        penalty = semantic_violation_penalty(batch_triples, idx2entity, idx2relation, constraints, entity_type_map)
-
-        return self.alpha * loss_bce + self.beta * loss_rank + self.gamma * penalty
-
-
+# **Modified TransE Model for Classification**
 def circular_correlation(a, b):
     """Compute circular correlation using FFT"""
     fft_a = torch.fft.fft(a, dim=-1)
@@ -219,410 +153,223 @@ class MLPHoIE(nn.Module):
                 x = x + residual
 
         # Output layer
-        output = torch.sigmoid(self.fc_out(x))
+        output = self.fc_out(x)
         return output
-
-    def score_triple(self, h, r, t):
-        """
-        Computes HoIE-style plausibility score for triples using circular correlation:
-        ⟨h ⋆ r, t⟩ where ⋆ denotes circular correlation
-        """
-        h_embed = self.entity_embeddings(h)
-        r_embed = self.relation_embeddings(r)
-        t_embed = self.entity_embeddings(t)
-
-        # Holographic Embeddings scoring: ⟨h ⋆ r, t⟩
-        h_corr_r = circular_correlation(h_embed, r_embed)
-        score = torch.sum(h_corr_r * t_embed, dim=1)  # shape: [batch_size]
-
-        return score
-
-from collections import Counter
-from scipy.stats import rankdata
-import numpy as np
-
-def generate_strict_ontology_negatives_fast(
-    triples,
-    constraints_idx,
-    entity_type_map_idx,
-    num_entities,
-    max_samples=None,
-    rng=None,
-    batch_size=10000,
-    check_duplicates=True,
-    known_triples_set=None
-):
-    if rng is None:
-        rng = np.random.default_rng()
-    if max_samples is None:
-        max_samples = len(triples)
-
-    sample_indices = rng.choice(len(triples), size=max_samples, replace=False)
-    sampled_triples = np.array(triples)[sample_indices]
-    corrupted = []
-
-    # Convert entity_type_map_idx to list for O(1) indexing
-    if isinstance(entity_type_map_idx, dict):
-        entity_type_list = [entity_type_map_idx.get(i, set()) for i in range(num_entities)]
-    else:
-        entity_type_list = entity_type_map_idx
-
-    for batch_start in range(0, max_samples, batch_size):
-        batch = sampled_triples[batch_start:batch_start + batch_size]
-
-        # Pre-sample large corruption pools
-        pool_size = 1000
-        head_pool = rng.choice(num_entities, size=pool_size, replace=False)
-        tail_pool = rng.choice(num_entities, size=pool_size, replace=False)
-
-        for s, p, o in batch:
-            domain, range_ = constraints_idx.get(p, (None, None))
-            candidates = []
-
-            if range_ is not None:
-                for corrupt_o in tail_pool:
-                    if range_ not in entity_type_list[corrupt_o]:
-                        candidate = (s, p, corrupt_o)
-                        if not (check_duplicates and known_triples_set and candidate in known_triples_set):
-                            candidates.append(candidate)
-
-            if domain is not None:
-                for corrupt_s in head_pool:
-                    if domain not in entity_type_list[corrupt_s]:
-                        candidate = (corrupt_s, p, o)
-                        if not (check_duplicates and known_triples_set and candidate in known_triples_set):
-                            candidates.append(candidate)
-
-            if candidates:
-                corrupted.append(rng.choice(candidates))
-
-    return np.array(corrupted)
-
-from rdflib.namespace import RDF
-from rdflib.namespace import RDFS, OWL
-
-def extract_domain_range_constraints(graph):
-    """
-    Extracts rdfs:domain and rdfs:range constraints for relations.
-    Returns a dictionary: {relation_uri: (domain_class_uri, range_class_uri)}
-    """
-    constraints = {}
-    for r in set(p for _, p, _ in graph):
-        domain = next((o for s, p, o in graph.triples((r, RDFS.domain, None))), None)
-        range_ = next((o for s, p, o in graph.triples((r, RDFS.range, None))), None)
-        if domain or range_:
-            constraints[r] = (domain, range_)
-    return constraints
-
-def build_entity_type_map(graph):
-    """
-    Builds a mapping from each entity to its rdf:type(s)
-    """
-    type_map = {}
-    for s, _, o in graph.triples((None, RDF.type, None)):
-        type_map.setdefault(s, set()).add(o)
-    return type_map
-
 
 # Load and preprocess dataset
 graph_file_path = GRAPH_FILE_PATH
 num_entities, num_relations, triples, entity2idx, relation2idx = preprocess_data(load_graph(graph_file_path))
 
-
 # Generate negative samples
-# === Extract ontology components ===
-graph = load_graph(graph_file_path)
-constraints = extract_domain_range_constraints(graph)
-entity_type_map = build_entity_type_map(graph)
-
-# === Build mappings for ontology-aware negative sampling ===
-def build_type_indices(entity_type_map, constraints, entity2idx, relation2idx):
-    all_types = set(t for types in entity_type_map.values() for t in types)
-    type2idx = {t: i for i, t in enumerate(sorted(all_types))}
-    constraints_idx = {}
-    for rel_uri, (domain_uri, range_uri) in constraints.items():
-        domain_idx = type2idx[domain_uri] if domain_uri in type2idx else None
-        range_idx = type2idx[range_uri] if range_uri in type2idx else None
-        if rel_uri in relation2idx:
-            constraints_idx[relation2idx[rel_uri]] = (domain_idx, range_idx)
-    entity_type_map_idx = {
-        entity2idx[ent]: {type2idx[t] for t in types if t in type2idx}
-        for ent, types in entity_type_map.items()
-        if ent in entity2idx
-    }
-    return type2idx, constraints_idx, entity_type_map_idx
-
-type2idx, constraints_idx, entity_type_map_idx = build_type_indices(
-    entity_type_map, constraints, entity2idx, relation2idx
-)
-
-# === Entity popularity ===
-entity_counts = np.zeros(num_entities)
-for s, _, o in triples:
-    entity_counts[s] += 1
-    entity_counts[o] += 1
-
-def flip_entities(triples):
-    flipped_triples = []
-    for triple in triples:
-        s, p, o = triple
-        # Flip subject and object entities
-        flipped_triples.append((o, p, s))
-    return np.array(flipped_triples)
-
-def popularity_based_sampling(triples, num_entities, num_relations, batch_size=1000):
-    entity_counter = Counter(triple[0] for triple in triples)
-    relation_counter = Counter(triple[1] for triple in triples)
-
-    # Rank entities and relations based on their frequency
-    entity_ranks = rankdata([-entity_counter[entity] for entity in range(num_entities)])
-    relation_ranks = rankdata([-relation_counter[relation] for relation in range(num_relations)])
-
-    # Calculate probability distribution using ranks
-    entity_probs = {entity: 1 / (entity_ranks[entity] + 1) for entity in range(num_entities)}
-    relation_probs = {relation: 1 / (relation_ranks[relation] + 1) for relation in range(num_relations)}
-
-    # Normalize probabilities
-    entity_probs_sum = sum(entity_probs.values())
-    relation_probs_sum = sum(relation_probs.values())
-    entity_probs = {entity: prob / entity_probs_sum for entity, prob in entity_probs.items()}
-    relation_probs = {relation: prob / relation_probs_sum for relation, prob in relation_probs.items()}
-
-    sampled_entities = np.random.choice(num_entities, size=batch_size, p=list(entity_probs.values()))
-    sampled_relations = np.random.choice(num_relations, size=batch_size, p=list(relation_probs.values()))
-
-    return [(entity, relation, entity) for entity, relation in zip(sampled_entities, sampled_relations)]
-
-# === Hybrid negative sampling ===
-# 1. Ontology-aware negatives
-# Optional: build known triples set to avoid duplicating positives
-known_triples_set = set(triples)
-
-ontology_negatives = generate_strict_ontology_negatives_fast(
-    triples=triples,
-    constraints_idx=constraints_idx,               # {relation_idx: (domain_idx, range_idx)}
-    entity_type_map_idx=entity_type_map_idx,       # {entity_idx: set(type_idx)}
-    num_entities=num_entities,
-    max_samples=len(triples),
-    rng=np.random.default_rng(SEED),
-    check_duplicates=True,
-    known_triples_set=known_triples_set
-)
-
-# 2. Flipped triples
-flipped_negatives = flip_entities(triples)
-
-# 3. Popularity-based noise
-popularity_negatives = popularity_based_sampling(
-    triples=triples,
-    num_entities=num_entities,
-    num_relations=num_relations,
-    batch_size=len(triples)
-)
-
-# 4. Merge & convert
-negative_triples = np.concatenate([
-    ontology_negatives,
-    flipped_negatives,
-    np.array(popularity_negatives)
-])
+rng = np.random.default_rng(SEED)
+negative_triples = [(s, p, (o + rng.integers(1, num_entities)) % num_entities) for s, p, o in triples]
 
 # Convert to tensors and send to GPU
-all_triples = np.concatenate([np.array(triples), negative_triples], axis=0)
+all_triples = np.array(triples + negative_triples)
 labels = np.array([1] * len(triples) + [0] * len(negative_triples))
 
-from sklearn.model_selection import train_test_split
-
-# Step 1: Split off 15% as test
-X_temp, X_test, y_temp, y_test = train_test_split(
-    all_triples, labels, test_size=0.15, random_state=SEED, stratify=labels
-)
-
-# Step 2: From remaining 85%, split 15% as validation => 0.15 / 0.85 ≈ 0.176
-X_train, X_val, y_train, y_val = train_test_split(
-    X_temp, y_temp, test_size=0.1765, random_state=SEED, stratify=y_temp
-)
-
-# Convert to PyTorch tensors and move to device
-X_train = torch.tensor(X_train, dtype=torch.long).to(DEVICE)
-y_train = torch.tensor(y_train, dtype=torch.float32).to(DEVICE)
-X_val = torch.tensor(X_val, dtype=torch.long).to(DEVICE)
-y_val = torch.tensor(y_val, dtype=torch.float32).to(DEVICE)
-X_test = torch.tensor(X_test, dtype=torch.long).to(DEVICE)
-y_test = torch.tensor(y_test, dtype=torch.float32).to(DEVICE)
+# Load the dataset from saved files
+X_train = torch.load("models/data/X_train.pt").to(DEVICE)
+y_train = torch.load("models/data/y_train.pt").to(DEVICE)
+X_val = torch.load("models/data/X_val.pt").to(DEVICE)
+y_val = torch.load("models/data/y_val.pt").to(DEVICE)
+X_test = torch.load("models/data/X_test.pt").to(DEVICE)
+y_test = torch.load("models/data/y_test.pt").to(DEVICE)
 
 # Training function
-def train_model(model, X_train, y_train, X_val, y_val,
-                idx2entity, idx2relation, constraints, entity_type_map,
-                epochs=EPOCHS, batch_size=BATCH_SIZE, learning_rate=LEARNING_RATE,
-                patience=PATIENCE, margin=1.0, lambda_rank=0.5, gamma_sem=1.0):
+def train_ranking_model(model, X_train, y_train, X_val, y_val,
+                        epochs, batch_size, learning_rate, patience,
+                        model_dir, model_name, margin=1.0):
     """
-    Train model using BCE + Ranking + Semantic Constraint Loss with Early Stopping and full logging.
+    Trains a model for a RANKING task using MarginRankingLoss.
+
+    This function is adapted from the classification trainer to use a ranking-objective,
+    requiring a model that outputs raw scores (logits) instead of probabilities.
+
+    Args:
+        model (nn.Module): The PyTorch model to be trained (must output raw logits).
+        X_train (torch.Tensor): Training feature data.
+        y_train (torch.Tensor): Training labels (0 for negative, 1 for positive).
+        X_val (torch.Tensor): Validation feature data.
+        y_val (torch.Tensor): Validation labels.
+        epochs (int): The maximum number of epochs.
+        batch_size (int): The number of samples per batch.
+        learning_rate (float): The learning rate for the optimizer.
+        patience (int): The number of epochs to wait for improvement before stopping early.
+        model_dir (str): The directory where the model and results will be saved.
+        model_name (str): The name of the model for titling plots.
+        margin (float): The desired margin for the MarginRankingLoss.
+
+    Returns:
+        nn.Module: The trained model with the weights from the best validation epoch.
     """
+    # --- 1. Setup ---
+    # Use MarginRankingLoss for the ranking task.
+    loss_fn = nn.MarginRankingLoss(margin=margin)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = HybridLossWithSemantics(margin=margin, alpha=1.0, beta=lambda_rank, gamma=gamma_sem)
-    bce_loss_only = nn.BCELoss()
-
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
-
     model.to(DEVICE)
-    model.train()
 
-    train_losses, val_losses = [], []
+    # Variables for tracking progress
+    train_losses = []
+    val_losses = []
     best_val_loss = float("inf")
     patience_counter = 0
     start_time = time.time()
 
+    # Create distinct directories for ranking results
+    plots_dir = os.path.join(model_dir, "plots_ranking")
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
+
+    print("--- Starting Model Training (Ranking Objective) ---")
+
+    # --- 2. Main Training Loop ---
     for epoch in range(epochs):
-        epoch_loss = 0
+        # --- Training Phase ---
+        model.train()
+        epoch_train_loss = 0
         num_batches = 0
 
         # Shuffle training data
         perm = torch.randperm(X_train.shape[0])
-        X_train, y_train = X_train[perm], y_train[perm]
+        X_train_shuffled, y_train_shuffled = X_train[perm], y_train[perm]
 
-        tqdm_bar = tqdm(range(0, len(X_train), batch_size), desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
-        for i in tqdm_bar:
-            batch_X = X_train[i:i + batch_size].to(DEVICE)
-            batch_y = y_train[i:i + batch_size].to(DEVICE)
-            h, r, t = batch_X[:, 0], batch_X[:, 1], batch_X[:, 2]
+        train_tqdm_bar = tqdm(range(0, len(X_train_shuffled), batch_size),
+                              desc=f"Epoch {epoch + 1}/{epochs} [T]",
+                              leave=False)
 
+        for i in train_tqdm_bar:
+            batch_X = X_train_shuffled[i:i + batch_size].to(DEVICE)
+            batch_y = y_train_shuffled[i:i + batch_size].to(DEVICE)
+
+            # Separate positive and negative triples for margin loss
+            pos_triples = batch_X[batch_y == 1]
+            neg_triples = batch_X[batch_y == 0]
+
+            # Margin loss requires pairs of positive and negative samples.
+            # If a batch is not mixed, we must skip it.
+            if len(pos_triples) == 0 or len(neg_triples) == 0:
+                continue
+
+            # Ensure tensors have the same length for comparison
+            min_len = min(len(pos_triples), len(neg_triples))
+            pos_triples = pos_triples[:min_len]
+            neg_triples = neg_triples[:min_len]
+
+            # Get raw scores (logits) from the model
+            pos_scores = model(pos_triples[:, 0], pos_triples[:, 1], pos_triples[:, 2])
+            neg_scores = model(neg_triples[:, 0], neg_triples[:, 1], neg_triples[:, 2])
+
+            # Target is a tensor of 1s, indicating we want pos_scores > neg_scores
+            target = torch.ones_like(pos_scores)
+
+            # Calculate loss
+            loss = loss_fn(pos_scores.view(-1), neg_scores.view(-1), target.view(-1))
+
+            # Backward pass and optimization
             optimizer.zero_grad()
-            preds = model(h, r, t).view(-1)
-
-            # Separate pos/neg triples
-            pos_mask = (batch_y == 1)
-            neg_mask = (batch_y == 0)
-
-            if pos_mask.sum() > 0 and neg_mask.sum() > 0:
-                pos_triples = batch_X[pos_mask]
-                neg_triples = batch_X[neg_mask]
-
-                min_len = min(len(pos_triples), len(neg_triples))
-                if min_len > 0:
-                    pos_triples = pos_triples[:min_len]
-                    neg_triples = neg_triples[:min_len]
-                    loss = loss_fn(
-                        pred_probs=preds,
-                        true_labels=batch_y,
-                        model=model,
-                        pos_triples=pos_triples,
-                        neg_triples=neg_triples,
-                        idx2entity=idx2entity,
-                        idx2relation=idx2relation,
-                        constraints=constraints,
-                        entity_type_map=entity_type_map
-                    )
-                else:
-                    loss = bce_loss_only(preds, batch_y.float())
-            else:
-                loss = bce_loss_only(preds, batch_y.float())
-
             loss.backward()
             optimizer.step()
 
-            epoch_loss += loss.item()
+            epoch_train_loss += loss.item()
             num_batches += 1
-            tqdm_bar.set_postfix(loss=epoch_loss / num_batches)
+            train_tqdm_bar.set_postfix(loss=f"{loss.item():.4f}")
 
-        avg_train_loss = epoch_loss / num_batches
+        avg_train_loss = epoch_train_loss / num_batches if num_batches > 0 else 0
         train_losses.append(avg_train_loss)
 
-        # === Validation (BCE only) ===
-        val_loss = 0.0
-        val_batches = 0
+        # --- Validation Phase ---
         model.eval()
+        epoch_val_loss = 0
+        val_batches = 0
         with torch.no_grad():
             for j in range(0, len(X_val), batch_size):
                 batch_X_val = X_val[j:j + batch_size].to(DEVICE)
                 batch_y_val = y_val[j:j + batch_size].to(DEVICE)
-                h_val, r_val, t_val = batch_X_val[:, 0], batch_X_val[:, 1], batch_X_val[:, 2]
-                val_preds = model(h_val, r_val, t_val).view(-1)
-                batch_loss = bce_loss_only(val_preds, batch_y_val.view(-1))
-                val_loss += batch_loss.item()
+
+                # Replicate the same pairing logic for validation
+                pos_val = batch_X_val[batch_y_val == 1]
+                neg_val = batch_X_val[batch_y_val == 0]
+
+                if len(pos_val) == 0 or len(neg_val) == 0:
+                    continue
+
+                min_len_val = min(len(pos_val), len(neg_val))
+                pos_scores_val = model(pos_val[:min_len_val, 0], pos_val[:min_len_val, 1], pos_val[:min_len_val, 2])
+                neg_scores_val = model(neg_val[:min_len_val, 0], neg_val[:min_len_val, 1], neg_val[:min_len_val, 2])
+                target_val = torch.ones_like(pos_scores_val)
+
+                batch_loss = loss_fn(pos_scores_val.view(-1), neg_scores_val.view(-1), target_val.view(-1))
+                epoch_val_loss += batch_loss.item()
                 val_batches += 1
 
-        avg_val_loss = val_loss / val_batches
+        avg_val_loss = epoch_val_loss / val_batches if val_batches > 0 else 0
         val_losses.append(avg_val_loss)
-        scheduler.step(avg_val_loss)
 
-        print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}")
+        print(f"Epoch {epoch + 1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
-        # Early stopping
+        # --- Early Stopping Logic ---
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(FULL_MODEL_DIR, "best_model.pth"))
-            print(f" New best model saved at epoch {epoch+1} with validation loss {avg_val_loss:.4f}")
-            with open(os.path.join(FULL_MODEL_DIR, "best_epoch.txt"), "w") as f:
-                f.write(f"{epoch + 1}\n")
+            torch.save(model.state_dict(), os.path.join(model_dir, "best_ranking_model.pth"))
+            print(f"  -> New best ranking model saved with validation loss: {avg_val_loss:.4f}")
+            with open(os.path.join(model_dir, "best_ranking_epoch.txt"), "w") as f:
+                f.write(str(epoch + 1))
         else:
             patience_counter += 1
-            print(f"Early Stopping Counter: {patience_counter}/{patience}")
-            if patience_counter >= patience:
-                print(f" Early stopping at epoch {epoch + 1} (No improvement for {patience} epochs)")
-                with open(os.path.join(FULL_MODEL_DIR, "last_epoch.txt"), "w") as f:
-                    f.write(f"{epoch + 1}\n")
-                break
+            print(f"  -> No improvement. Early Stopping Counter: {patience_counter}/{patience}")
 
-        model.train()
+        if patience_counter >= patience:
+            print(f"\nEarly stopping triggered at epoch {epoch + 1}.")
+            with open(os.path.join(model_dir, "last_ranking_epoch.txt"), "w") as f:
+                f.write(str(epoch + 1))
+            break
 
+    # --- 3. Post-Training ---
     training_time = time.time() - start_time
-    print(f"Training completed in {training_time:.2f} seconds.")
-    with open(os.path.join(FULL_MODEL_DIR, "training_time.txt"), "w") as f:
-        f.write(f"Training Time: {training_time:.2f} seconds ({training_time / 60:.2f} minutes)\n")
+    print(f"\n--- Training Completed in {training_time:.2f} seconds ---")
+    with open(os.path.join(model_dir, "training_time_ranking.txt"), "w") as f:
+        f.write(f"Training Time: {training_time:.2f} seconds\n")
 
     # Save losses
-    plots_dir = os.path.join(FULL_MODEL_DIR, "plots")
-    os.makedirs(plots_dir, exist_ok=True)
-    np.save(os.path.join(FULL_MODEL_DIR, "train_losses.npy"), np.array(train_losses))
-    np.save(os.path.join(FULL_MODEL_DIR, "val_losses.npy"), np.array(val_losses))
+    np.save(os.path.join(model_dir, "train_losses_ranking.npy"), np.array(train_losses))
+    np.save(os.path.join(model_dir, "val_losses_ranking.npy"), np.array(val_losses))
 
-    # Plot losses
-    plt.figure(figsize=(8, 6))
-    plt.plot(train_losses, label="Training Loss", color='blue', linewidth=2)
-    plt.plot(val_losses, label="Validation Loss", color='red', linestyle="--", linewidth=2)
+    # Plot and save the loss curve
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, label="Training Loss", color='blue')
+    plt.plot(val_losses, label="Validation Loss", color='red', linestyle="--")
     plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.title(f"Training vs Validation Loss - {MODEL_NAME}")
+    plt.ylabel("Margin Ranking Loss")
+    plt.title(f"Ranking Training & Validation Loss - {model_name}")
     plt.legend()
     plt.grid(alpha=0.3)
-    plt.savefig(os.path.join(plots_dir, "loss_plot.png"), dpi=300, bbox_inches="tight")
+    loss_plot_path = os.path.join(plots_dir, "loss_plot_ranking.png")
+    plt.savefig(loss_plot_path, dpi=300, bbox_inches="tight")
     plt.close()
-    print(f" Training & Validation loss plot saved to {os.path.join(plots_dir, 'loss_plot.png')}")
+    print(f"Ranking loss plot saved to: {loss_plot_path}")
 
-    # Load best model
-    model.load_state_dict(torch.load(os.path.join(FULL_MODEL_DIR, "best_model.pth")))
-    print(f" Best model from epoch {epoch + 1 - patience_counter} loaded for evaluation.")
+    # Load the best model and return
+    model.load_state_dict(torch.load(os.path.join(model_dir, "best_ranking_model.pth")))
+    print(f"Best ranking model weights (from epoch {epoch + 1 - patience_counter}) loaded.")
+
     return model
-
-g = load_graph(graph_file_path)
-constraints = extract_domain_range_constraints(g)
-entity_type_map = build_entity_type_map(g)
-idx2entity = [None] * num_entities
-for ent_uri, idx in entity2idx.items():
-    idx2entity[idx] = ent_uri
-
-idx2relation = [None] * num_relations
-for rel_uri, idx in relation2idx.items():
-    idx2relation[idx] = rel_uri
 
 # Train Classification Model
 classifier = MLPHoIE(num_entities, num_relations, EMBEDDING_DIM).to(DEVICE)
-trained_classifier = train_model(
+trained_classifier = train_ranking_model(
     model=classifier,
     X_train=X_train,
     y_train=y_train,
     X_val=X_val,
     y_val=y_val,
-    idx2entity=idx2entity,
-    idx2relation=idx2relation,
-    constraints=constraints,
-    entity_type_map=entity_type_map,
-    patience=5,
-    margin=1.0,
-    lambda_rank=0.5,
-    gamma_sem=1.0
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    learning_rate=LEARNING_RATE,
+    patience=PATIENCE,
+    model_dir=FULL_MODEL_DIR,
+    model_name=MODEL_NAME
 )
 os.makedirs(FULL_MODEL_DIR, exist_ok=True)
 torch.save(trained_classifier.state_dict(), os.path.join(FULL_MODEL_DIR, "classifier.pth"))
@@ -771,27 +518,27 @@ def generate_advanced_plots(y_true, y_scores, train_losses, val_losses, model, m
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.savefig(os.path.join(plots_dir, "f1_by_threshold.png"), dpi=300, bbox_inches="tight")
     plt.close()
-    # # ---- t-SNE Visualization of Entity Embeddings ----
-    # entity_embeddings = model.entity_embeddings.weight.cpu().detach().numpy()
-    # max_samples = 5000
-    # if entity_embeddings.shape[0] > max_samples:
-    #     sampled_indices = np.random.choice(entity_embeddings.shape[0], max_samples, replace=False)
-    #     entity_embeddings = entity_embeddings[sampled_indices]
-    # perplexity_value = 30 if entity_embeddings.shape[0] > 100 else 5
-    # tsne = TSNE(n_components=2, perplexity=perplexity_value, random_state=42)
-    # reduced_embeddings = tsne.fit_transform(entity_embeddings)
-    # num_clusters = min(10, len(reduced_embeddings) // 500)
-    # kmeans = KMeans(n_clusters=num_clusters, n_init=10, random_state=42)
-    # cluster_labels = kmeans.fit_predict(reduced_embeddings)
-    # plt.figure(figsize=(10, 6))
-    # scatter = plt.scatter(reduced_embeddings[:, 0], reduced_embeddings[:, 1], c=cluster_labels, cmap="viridis", alpha=0.7)
-    # plt.xlabel("t-SNE Component 1", fontsize=14, fontweight="bold")
-    # plt.ylabel("t-SNE Component 2", fontsize=14, fontweight="bold")
-    # plt.title("t-SNE Visualization of Entity Embeddings", fontsize=16, fontweight="bold")
-    # plt.colorbar(scatter, label="Cluster Index")
-    # plt.grid(True, linestyle="--", alpha=0.6)
-    # plt.savefig(os.path.join(plots_dir, "tsne_embeddings.png"), dpi=300, bbox_inches="tight")
-    # plt.close()
+    # ---- t-SNE Visualization of Entity Embeddings ----
+    entity_embeddings = model.entity_embeddings.weight.cpu().detach().numpy()
+    max_samples = 5000
+    if entity_embeddings.shape[0] > max_samples:
+        sampled_indices = np.random.choice(entity_embeddings.shape[0], max_samples, replace=False)
+        entity_embeddings = entity_embeddings[sampled_indices]
+    perplexity_value = 30 if entity_embeddings.shape[0] > 100 else 5
+    tsne = TSNE(n_components=2, perplexity=perplexity_value, random_state=42)
+    reduced_embeddings = tsne.fit_transform(entity_embeddings)
+    num_clusters = min(10, len(reduced_embeddings) // 500)
+    kmeans = KMeans(n_clusters=num_clusters, n_init=10, random_state=42)
+    cluster_labels = kmeans.fit_predict(reduced_embeddings)
+    plt.figure(figsize=(10, 6))
+    scatter = plt.scatter(reduced_embeddings[:, 0], reduced_embeddings[:, 1], c=cluster_labels, cmap="viridis", alpha=0.7)
+    plt.xlabel("t-SNE Component 1", fontsize=14, fontweight="bold")
+    plt.ylabel("t-SNE Component 2", fontsize=14, fontweight="bold")
+    plt.title("t-SNE Visualization of Entity Embeddings", fontsize=16, fontweight="bold")
+    plt.colorbar(scatter, label="Cluster Index")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.savefig(os.path.join(plots_dir, "tsne_embeddings.png"), dpi=300, bbox_inches="tight")
+    plt.close()
 
 def evaluate_model(model, X_test, y_test, model_name="TransEModel", batch_size=512):
     """
